@@ -10,12 +10,23 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema.define(version: 2020_03_06_173220) do
+ActiveRecord::Schema.define(version: 2020_03_13_201156) do
 
   # These are extensions that must be enabled in order to support this database
   enable_extension "pgcrypto"
   enable_extension "plpgsql"
   enable_extension "uuid-ossp"
+
+  create_table "event_stream_ids", id: false, force: :cascade do |t|
+    t.integer "id", default: 0, null: false
+  end
+
+  create_table "event_streams", id: false, force: :cascade do |t|
+    t.integer "id", null: false
+    t.uuid "event_id", null: false
+    t.index ["event_id"], name: "index_event_streams_on_event_id", unique: true
+    t.index ["id"], name: "index_event_streams_on_id", unique: true
+  end
 
   create_table "events", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
     t.string "event_type", null: false
