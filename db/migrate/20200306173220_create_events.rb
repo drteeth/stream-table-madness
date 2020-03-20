@@ -1,6 +1,6 @@
 class CreateEvents < ActiveRecord::Migration[6.0]
   def change
-    create_table :events, id: :uuid do |t|
+    create_table :event_records do |t|
       t.string :event_type, null: false
       t.jsonb :data, null: false, default: {}
 

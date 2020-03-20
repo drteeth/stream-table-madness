@@ -17,22 +17,25 @@ ActiveRecord::Schema.define(version: 2020_03_13_201156) do
   enable_extension "plpgsql"
   enable_extension "uuid-ossp"
 
-  create_table "event_stream_ids", id: false, force: :cascade do |t|
-    t.integer "id", default: 0, null: false
-  end
-
-  create_table "event_streams", id: false, force: :cascade do |t|
-    t.integer "id", null: false
-    t.uuid "event_id", null: false
-    t.index ["event_id"], name: "index_event_streams_on_event_id", unique: true
-    t.index ["id"], name: "index_event_streams_on_id", unique: true
-  end
-
-  create_table "events", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
+  create_table "event_records", force: :cascade do |t|
     t.string "event_type", null: false
     t.jsonb "data", default: {}, null: false
     t.datetime "created_at", precision: 6, null: false
     t.datetime "updated_at", precision: 6, null: false
+  end
+
+  create_table "event_stream_ids", id: :bigint, default: nil, force: :cascade do |t|
+  end
+
+  create_table "event_streams", id: :bigint, default: nil, force: :cascade do |t|
+    t.bigint "event_record_id", null: false
+    t.index ["event_record_id"], name: "index_event_streams_on_event_record_id", unique: true
+    t.index ["id"], name: "index_event_streams_on_id", unique: true
+  end
+
+  create_table "events_queue", id: false, force: :cascade do |t|
+    t.bigint "event_record_id", null: false
+    t.index ["event_record_id"], name: "index_events_queue_on_event_record_id", unique: true
   end
 
   create_table "stream_events", id: false, force: :cascade do |t|

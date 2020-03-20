@@ -22,8 +22,12 @@ require "ap"
 class Meow
   include Concurrent::Async
 
-  def initialize(all_stream)
+  attr_reader :promises
+
+  def initialize(all_stream, publisher)
     @all_stream = all_stream
+    @publisher = publisher
+    @promises = []
   end
 
   def link(stream, event)
@@ -34,7 +38,7 @@ class Meow
               WHERE streams.id = #{stream.id}
               RETURNING version - 1 as initial_stream_version
             ),
-            events (index, event_id) AS (VALUES (1, '#{event.id}'::uuid))
+            event_records (index, event_id) AS (VALUES (1, '#{event.id}'::uuid))
           INSERT INTO stream_events
             (
               event_id,
@@ -42,45 +46,115 @@ class Meow
               stream_version
             )
           SELECT
-            events.event_id,
+            event_records.event_id,
             #{stream.id},
-            stream.initial_stream_version + events.index
-          FROM events, stream;
+            stream.initial_stream_version + event_records.index
+          FROM event_records, stream;
     SQL
 
     ActiveRecord::Base.connection.execute(sql)
   end
 
   def append(stream, label, delay)
-    Event.transaction do
+    event = Event.transaction do
       print '.'
       event = Event.create!(event_type: label)
 
       # link(stream, event)
       # link(@all_stream, event)
-      sleep(1)
+      sleep(delay)
 
       puts "Created #{label}"
+      event
     end
+    @promises = @publisher.async.publish(event)
   end
 end
 
-store_proc(events) do
-  begin
-    write_the_events_Table
+class EventPublisher
+  include Concurrent::Async
+
+  attr_reader :order
+
+  def initialize
+    @order = []
+    @last_seen = 0
   end
 
-  begin
-    write_to_the_stream_table_in_serial
+  def publish(event)
+    # THIS IS ASYNC OK SO DONT BE TOO FUCKY WITH THE IVARS
+    connection = ActiveRecord::Base.connection
+    begin
+      connection.query_value('select pg_advisory_lock(4191514917)');
+
+      event_record_ids = queued_events(connection)
+      while event_record_ids.any?
+        count = event_record_ids.count
+
+        params = event_record_ids.each_with_index.map { |eid, i|
+          "(#{eid}, #{i + 1})"
+        }.join(', ')
+
+        connection.transaction do
+          connection.execute <<-SQL
+            WITH stream AS (
+              UPDATE event_stream_ids SET id = id + #{count}
+              RETURNING id - #{count} AS original_id
+            ),
+            events (event_record_id, index) AS (
+              VALUES #{params}
+            )
+            INSERT INTO event_streams (id, event_record_id)
+              SELECT
+                stream.original_id + events.index,
+                events.event_record_id
+              FROM events, stream;
+          SQL
+
+          connection.execute <<-SQL
+            DELETE FROM events_queue
+              WHERE (event_record_id) IN (#{event_record_ids.join(',')});
+          SQL
+
+          sleep(1.1)
+        end
+
+        event_record_ids = queued_events(connection)
+      end
+    ensure
+      connection.query_value('select pg_advisory_unlock(4191514917)');
+    end
+
+    query = <<~SQL
+      select event_streams.id, event_type
+      from event_streams
+      inner join event_records on event_records.id = event_streams.event_record_id
+      where event_streams.id > #{@last_seen}
+      order by event_streams.id
+    SQL
+    events = connection.exec_query(query).to_a
+
+    events.each do |row|
+      @order << row["event_type"]
+      @last_seen = row["id"]
+      pp order: order
+    end
+  rescue => e
+    pp e
+  end
+
+  def queued_events(connection)
+    connection.query_values <<~SQL
+      SELECT event_record_id FROM events_queue ORDER BY event_record_id ASC LIMIT 1000
+    SQL
   end
 end
-
 
 def read_stream(stream)
   sql = <<~SQL
-    select event_type, event_streams.id, pg_xact_commit_timestamp(events.xmin) as tx
+    select event_type, event_streams.id, pg_xact_commit_timestamp(event_records.xmin) as tx
     from event_streams
-    inner join events on events.id = event_streams.event_id
+    inner join event_records on event_records.id = event_streams.event_record_id
     order by event_streams.id
     ;
   SQL
@@ -122,14 +196,17 @@ task shit: :environment do
   stream_b = Stream.create!
   stream_c = Stream.create!
   global = Stream.create!
+  publisher = EventPublisher.new
 
-  promises = 70.times.map { |i| Meow.new(global).async.append(stream_a, i.to_s, 0) }
-  # promises << Meow.new(global).async.append(stream_a, 'A1', 6)
-  # promises << Meow.new(global).async.append(stream_b, 'B1', 5)
-  # promises << Meow.new(global).async.append(stream_a, 'A2', 4)
-  # promises << Meow.new(global).async.append(stream_b, 'B2', 3)
-  # promises << Meow.new(global).async.append(stream_a, 'A3', 2)
-  # promises << Meow.new(global).async.append(stream_b, 'B3', 1)
+  # promises = 70.times.map { |i| Meow.new(global, publisher).async.append(stream_a, i.to_s, Random.rand(10)) }
+  promises = []
+  promises << Meow.new(global, publisher).async.append(stream_a, 'A1', 6)
+  promises << Meow.new(global, publisher).async.append(stream_b, 'B1', 5)
+  promises << Meow.new(global, publisher).async.append(stream_a, 'A2', 4)
+  promises << Meow.new(global, publisher).async.append(stream_b, 'B2', 3)
+  promises << Meow.new(global, publisher).async.append(stream_a, 'A3', 2)
+  promises << Meow.new(global, publisher).async.append(stream_b, 'B3', 1)
+  promises << Meow.new(global, publisher).async.append(stream_a, 'A4', 1)
 
   # promises << Meow.new(global).async.append(stream_a, 'A1', 1)
   # promises << Meow.new(global).async.append(stream_a, 'A2', 1)
@@ -149,20 +226,14 @@ task shit: :environment do
 
   promises.each(&:wait)
 
+  sleep(2)
+
   pp "done"
+  pp publisher.order
 
   # state = nil
   # loop do
-  #   # event_order = ActiveRecord::Base.connection.exec_query('select event_type from events order_by_created_at').to_a.map(&:values)
-  #   # stream_a_order = read_stream(stream_a)
-  #   # stream_b_order = read_stream(stream_b)
   #   global_order = read_stream(global)
-  #
-  #   # new_state = {
-  #   #   A: stream_a_order,
-  #   #   B: stream_b_order,
-  #   #   G: global_order
-  #   # }
   #
   #   if global_order != state
   #     state = global_order
